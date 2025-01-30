@@ -1,0 +1,114 @@
+pipeline {
+
+    agent any
+
+    tools {
+        nodejs 'node'
+    }
+
+    environment {
+        ECR_REPO_URL = ''
+        IMAGE_NAME = "${ECR_REPO_URL}/backend"
+        IMAGE_TAG = "v${BUILD_NUMBER}"
+        SCANNER_HOME = tool 'sonar-scanner'
+        AWS_REGION = 'us-east-2'
+        AWS_ACCESS_KEY_ID = credentials('jenkins_aws_access_key_id')
+        AWS_SECRET_ACCESS_KEY = credentials('jenkins_aws_secret_key')
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                script {
+                    echo 'Checking out code from the repository...'
+                    git branch: url: 'https://github.com/chinmaya10000/Kubernetes-Three-Tier.git'
+                }
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    dir('Application-Code/backend') {
+                        sh 'npm install'
+                    }
+                }
+            }
+        }
+        stage('Run Tests') {
+            steps {
+                script {
+                    dir('Application-Code/backend') {
+                        sh 'npm test'
+                    }
+                }
+            }
+        }
+        stage('SonarQube Analysis (SAST)') {
+            steps {
+                script {
+                    dir('Application-Code/backend') {
+                        withSonarQubeEnv('sonae-server') {
+                            sh "$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectKey=backend -Dsonar.projectName=backend"
+                        }
+                    }
+                }
+            }
+        }
+        stage('Quality Gate') {
+            steps {
+                script {
+                    timeout(time: 1, unit: 'HOURS') {
+                        waitForQualityGate abortPipeline: false
+                    }
+                }
+            }
+        }
+        stage('SCA - Dependency Check') {
+            steps {
+                script {
+                    dir('Application-Code/backend') {
+                        echo 'Starting OWASP Dependency Check for security vulnerabilities...'
+                        dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                        dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                    }
+                }
+            }
+        }
+        stage('Trivy File System Scan') {
+            steps {
+                script {
+                    dir('Application-Code/backend') {
+                        sh 'trivy fs --scanners vuln,secret,misconfig --format json --output trivy-report.json'
+                    }
+                }
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    dir('Application-Code/backend') {
+                        echo 'Building the Docker image...'
+                        sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+                    }
+                }
+            }
+        }
+        stage('Scan Docker Image') {
+            steps {
+                script {
+                    echo 'Scanning the Docker image for vulnerabilities...'
+                    sh "trivy image -f json -o trivy.json --severity HIGH,CRITICAL --exit-code 1 ${IMAGE_NAME}:${IMAGE_TAG}"
+                }
+            }
+        }
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    echo 'Pushing the Docker image to Amazon ECR...'
+                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO_URL}"
+                    sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+                }
+            }
+        }
+    }
+}
