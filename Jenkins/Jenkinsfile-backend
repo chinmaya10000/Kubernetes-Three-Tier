@@ -7,13 +7,14 @@ pipeline {
     }
 
     environment {
-        ECR_REPO_URL = ''
+        ECR_REPO_URL = '156041433917.dkr.ecr.us-east-2.amazonaws.com'
         IMAGE_NAME = "${ECR_REPO_URL}/backend"
         IMAGE_TAG = "v${BUILD_NUMBER}"
         SCANNER_HOME = tool 'sonar-scanner'
         AWS_REGION = 'us-east-2'
         AWS_ACCESS_KEY_ID = credentials('jenkins_aws_access_key_id')
         AWS_SECRET_ACCESS_KEY = credentials('jenkins_aws_secret_key')
+        GITLAB_TOKEN = credentials('gitlab_token')
     }
 
     stages {
@@ -107,6 +108,47 @@ pipeline {
                     echo 'Pushing the Docker image to Amazon ECR...'
                     sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO_URL}"
                     sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+                }
+            }
+        }
+        stage('Clone/Pull Repo') {
+            steps {
+                script {
+                    if(fileExists('kubernetes-manifest')) {
+
+                        echo 'Cloned repo already exists - Pulling latest changes'
+                        dir('kubernetes-manifest') {
+                            sh 'git pull'
+                        }
+                    } else {
+                        echo 'Repo does not exists - Cloning the repo'
+                        sh 'git clone https://gitlab.com/chinmaya10000/kubernetes-manifest.git'
+                    }
+                }
+            }
+        }
+        stage('Update Manifest') {
+            steps {
+                script {
+                    dir('kubernetes-manifest/three-tier/backend') {
+                        echo 'Update the Kubernetes manifest with the new image tag...'
+                        sh "sed -i 's#image: 156041433917.dkr.ecr.us-east-2.amazonaws.com/.*#image: ${IMAGE_NAME}:${IMAGE_TAG}#g' deployment.yaml"
+                    }
+                }
+            }
+        }
+        stage('GitOps Update') {
+            steps {
+                script {
+                    echo 'Commit and push the changes'
+                    dir('kubernetes-manifest/three-tier/backend') {
+                        sh 'git config --global user.name "Jenkins CI"'
+                        sh 'git config --global user.email "Jenkins@gmail.com"'
+                        sh "git remote set-url origin https://${GITLAB_TOKEN}@gitlab.com/chinmaya10000/kubernetes-manifest.git"
+                        sh 'git add .'
+                        sh 'git commit -m "Update backend image version - ${IMAGE_TAG}"'
+                        sh 'git push origin main'
+                    }
                 }
             }
         }
